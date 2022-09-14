@@ -1,0 +1,31 @@
+{
+  "ListenPort": 8888,
+  "DefaultTimer": 600,
+  "Queries": [
+    {
+      "db_type": "MySqlConnection",
+      "json_result": 1,
+      "query_id": "query1",
+      "sql": "SELECT json_array(f1, f2, f3) as '0' FROM big_table",
+      "timer": 1,
+      "connection_string": "SERVER=localhost;PIPENAME=\\\\.\\pipe\\MYSQL8;DATABASE=test;UID=user;PASSWORD=1234;"
+    },
+    {
+      "db_type": "MySqlConnection",
+      "json_result": 2,
+      "query_id": "query2",
+      "sql": "SELECT json_arrayagg(json_array(f1, f2, f3)) as '0' FROM big_table",
+      "timer": 1,
+      "connection_string": "SERVER=localhost;PORT=3306;DATABASE=test;UID=user;PASSWORD=1234;"
+    },
+    {
+      "db_type": "MySqlConnection",
+      "json_result": 0,
+      "datetime_format": "yyyy-MM-dd HH:mm:ss",
+      "query_id": "query3",
+      "sql": "SELECT * FROM big_table",
+      "timer": 1,
+      "connection_string": "SERVER=localhost;PORT=3306;DATABASE=test;UID=user;PASSWORD=1234;"
+    }
+  ]
+}
