@@ -1,4 +1,4 @@
-﻿#define CONSOLE
+﻿//#define CONSOLE
 
 using System.Net;
 using System.Net.Sockets;
@@ -59,12 +59,12 @@ namespace SqlCacheService
 				ClientsList.RemoveAt(ClientsList.FindIndex(tcpClient => tcpClient.WorkSocket==s));
 			}
 			catch (ArgumentOutOfRangeException) { }
+#if DEBUG && CONSOLE
 			catch (Exception ex)
 			{
-				#if DEBUG && CONSOLE
 					Console.WriteLine( ex.Message);
-				#endif
 			}
+#endif
 		}
 	}
 
@@ -113,17 +113,10 @@ namespace SqlCacheService
 					{
 						state = new TcpClient(await _tcpListener.AcceptSocketAsync(_cancellationToken));
 					}
-					catch (ObjectDisposedException ex)
+					catch (Exception ex) when( ex is ObjectDisposedException or SocketException )
 					{
 						#if DEBUG && CONSOLE && VERBOSE
 							Console.WriteLine( "StartListening " + Globals.ObjectDisposedException + ex.Message);
-						#endif
-						_onExit++;
-					}
-					catch (SocketException ex)
-					{
-						#if DEBUG && CONSOLE && VERBOSE
-							Console.WriteLine( "StartListening " +Globals.SocketExceptionError + ex.Message);
 						#endif
 						_onExit++;
 					}
@@ -192,7 +185,7 @@ namespace SqlCacheService
 			TcpClient state = (TcpClient)ar.AsyncState;
 			
 			// here it is possible two issue: state.WorkSocket and async operation was canceled
-			int bytesRead = -1;
+			var bytesRead = -1;
 			if (state.WorkSocket!=null)
 			{
 				try
@@ -200,25 +193,19 @@ namespace SqlCacheService
 					// Read data from the client socket.
 					bytesRead = state.WorkSocket!.EndReceive(ar);
 				}
-				catch (ObjectDisposedException ex)
+				catch( Exception ex ) when( ex is ObjectDisposedException or SocketException )
 				{
 					#if DEBUG && CONSOLE
 					Console.WriteLine( "ReadCallback " + Globals.ObjectDisposedException + ex.Message);
 					#endif
 					bytesRead = -2;
 				}
-				catch( SocketException ex )
-				{
-					#if DEBUG && CONSOLE
-					Console.WriteLine( "ReadCallback " + Globals.SocketExceptionError + ex.Message);
-					#endif
-				}
 			}
 
 			if( bytesRead>0 )
 			{
 				var part = Encoding.UTF8.GetString(state.InBuffer, 0, bytesRead)
-					.Replace("\r", "").Replace("\n", "").Replace("\t", "");	// .Replace("\t", " ")
+					.Replace("\r", "").Replace("\n", "").Replace("\t", "");
 				
 				state.OutDataSb!.Append( part );
 				var request = state.OutDataSb.ToString().Trim();
@@ -264,7 +251,7 @@ namespace SqlCacheService
 										#if DEBUG && CONSOLE && VERBOSE
 											Console.WriteLine( $"FetchSqlData Completed Successfully rows={rows}" );
 										#endif
-										
+
 										// -2 means buffer is not assigned to List
 										state.BufferIndex = -2;
 										state.QdQueryData = new QueryData
@@ -413,18 +400,12 @@ namespace SqlCacheService
 				{
 					bytesSent = state.WorkSocket!.EndSend(ar);
 				}
-				catch (SocketException ex)
+				catch (Exception ex) when( ex is SocketException or ObjectDisposedException )
 				{
 					#if DEBUG && CONSOLE
 						Console.WriteLine( "\nSendCallback " + Globals.SocketExceptionError + ex.Message );
 					#endif
 					bytesSent = -1;
-				}
-				catch (ObjectDisposedException ex)
-				{
-					#if DEBUG && CONSOLE
-						Console.WriteLine( "\nSendCallback " + Globals.ObjectDisposedException + ex.Message );
-					#endif
 				}
 			}
 

@@ -1,4 +1,8 @@
-#define CONSOLE
+//#define CONSOLE
+#if DEBUG
+// 	#define CONSOLE
+// 	#define VERBOSE
+#endif
 
 namespace SqlCacheService
 {

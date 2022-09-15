@@ -3,7 +3,7 @@
 	public static class Globals
 	{
 		public const string TextServiceName = "SqlCacheService";
-		public const string LoggerTemplate = "{Time} SqlCacheService {ErrorMessage}";
+		public const string LoggerTemplate = "{Time} {ErrorMessage}";
 
 		public const string LostContentError = "Socket client content was lost!";
 		public const string SocketExceptionError = "SocketExceptionError: ";
@@ -14,6 +14,7 @@
 		public const string QueryNotFoundError = "Query not found";
 		public const string FailedAddQueryError = "Failed to add query";
 		public const string NotImplementedError = "Not implemented!";
+		public const string FileNotFoundError = "Use default settings. ";
 
 		public const string ObjectDisposedException = "ObjectDisposedException: ";
 		public const string JsonException = "JsonException: ";

@@ -225,19 +225,17 @@ namespace SqlCacheService
 	/// </summary>
 	public class SqlNetCache : SqlNetCacheData
 	{
-		private readonly IConfiguration _configuration;
-		int _onExit;
-		readonly int _listenPort = 38888;
+		//readonly IConfiguration _configuration;
 		//readonly int _connectionLimit = 1;
-		readonly int _defaultTimer = 300;
+		int _onExit;
 		int _queriesNumber;
+		readonly int _listenPort = 38888;
+		readonly int _defaultTimer = 600;
 		readonly bool _configured;
 		readonly QueryController _queryController = new QueryController();
-		//readonly List<SqlConnection> _sqlConnectionList = new List<SqlConnection>();
 		readonly List<string> _sqlConnectionList = new List<string>();
 		readonly CancellationToken _cancellationToken;
 		readonly ILogger _logger;
-
 		readonly Dictionary<string, Dbw> _connectionPool = new Dictionary<string, Dbw>();
 
 		Timer? _systemTimer;
@@ -357,22 +355,12 @@ namespace SqlCacheService
 
 			try
 			{
-				var jsonConfig = JsonDocument.Parse(request, 
-					new JsonDocumentOptions{ CommentHandling = JsonCommentHandling.Skip });
+				JsonDocument jsonConfig = JsonDocument.Parse(request,
+					new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip });
 				var queryConfigDic = jsonConfig.RootElement.Deserialize<Dictionary<string, object>>();
-				return UnpackJsonDicTuple( queryConfigDic );
+				return UnpackJsonDicTuple(queryConfigDic);
 			}
-			catch (JsonException ex)
-			{
-				Console.WriteLine( Globals.JsonException + ex.Message);
-				errorMessage = ex.Message;
-			}
-			catch (ArgumentException ex)
-			{
-				Console.WriteLine( Globals.FormatException + ex.Message);
-				errorMessage = ex.Message;
-			}
-			catch (NotSupportedException ex)
+			catch( Exception ex ) when( ex is JsonException or ArgumentException or NotSupportedException )
 			{
 				Console.WriteLine( Globals.Exception + ex.Message);
 				errorMessage = ex.Message;
@@ -390,20 +378,20 @@ namespace SqlCacheService
 		{
 			_cancellationToken = cancellationToken;
 			_logger = logger;
-			_configuration = configuration;
+			//_configuration = configuration;
 
-			var fileName = _configuration["config"];
+			var fileName = configuration["config"];
 			try
 			{
 				if( fileName==null )
 				{
 					// Initialize config from json file
 					// fileName = @"/mnt/e/Users/Alex/source/TestData/configfileLinux.json";
-					fileName = RuntimeInformation.IsOSPlatform(OSPlatform.Linux) ? @"configfileLinux.json" : @"configfile.json";
+					fileName = RuntimeInformation.IsOSPlatform(OSPlatform.Linux) ? "configfileLinux.json" : "configfile.json";
 				}
 				
 				var json = File.ReadAllText(fileName);
-				var jsonConfig = JsonDocument.Parse( json, new JsonDocumentOptions{ CommentHandling = JsonCommentHandling.Skip });
+				JsonDocument jsonConfig = JsonDocument.Parse( json, new JsonDocumentOptions{ CommentHandling = JsonCommentHandling.Skip });
 
 				if (jsonConfig.RootElement.TryGetProperty("ListenPort", out JsonElement gradeElement))
 				{
@@ -470,8 +458,12 @@ namespace SqlCacheService
 			}
 			catch ( JsonException ex )
 			{
-				//Console.WriteLine("Error: " + ex.Message);
 				_logger.LogError(Globals.LoggerTemplate, DateTimeOffset.Now, ex.Message );
+			}
+			catch ( Exception ex ) when( ex is FileNotFoundException or DirectoryNotFoundException )
+			{
+				_logger.LogError(Globals.LoggerTemplate, DateTimeOffset.Now, Globals.FileNotFoundError + ex.Message );
+				_configured = true;
 			}
 		}
 
@@ -582,10 +574,6 @@ namespace SqlCacheService
 					query.RemoveSqlBuffer();
 				#endif
 			}
-			
-			#if DEBUG && !VERBOSE
-				DisplayStoredQueries();
-			#endif
 		}
 
 		public override async Task<int> FetchSqlData( string? connectionString, string? sql, int jsonResultType,
@@ -696,8 +684,9 @@ namespace SqlCacheService
 									break;
 
 								//case DateTimeOffset:
-								//jsonWriter.WriteStringValue(reader.GetDateTime(i).ToString(Globals.TextDateFormat));
-								//break;
+									//jsonWriter.WriteStringValue(reader.GetDateTime(i).ToString(Globals.TextDateFormat));
+									//break;
+
 								case DateTime or DateTimeOffset:
 									jsonWriter.WriteStringValue(reader.GetDateTime(i).ToString(Globals.TextDateFormat));
 									//CultureInfo.InvariantCulture
@@ -741,14 +730,9 @@ namespace SqlCacheService
 					#endif
 				}
 			}
-			catch( InvalidOperationException ex )
+			catch( Exception ex ) when (ex is InvalidOperationException or MySqlException or NpgsqlException )
 			{
-				errorMessage = "Error: " + ex.Message;
-				rows = 0;
-			}
-			catch( DbException ex )
-			{
-				errorMessage = "Error: " + ex.Message;
+				errorMessage = "Exception: " + ex.Message;
 				rows = 0;
 			}
 			finally
