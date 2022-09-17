@@ -16,15 +16,18 @@
 		public const string NotImplementedError = "Not implemented!";
 		public const string FileNotFoundError = "Use default settings. ";
 
+		
 		public const string ObjectDisposedException = "ObjectDisposedException: ";
 		public const string JsonException = "JsonException: ";
 		public const string FormatException = "FormatException: ";
 		public const string Exception = "Exception: ";
 	
 		public const string TextSocketClosed = "Socket closed.";
+		public const string TextNoQueries = "There are no cached queries.";
 		public const string TextListenerClosed = TextServiceName + " finished. Goodbye!";
 		public const string TextDateFormat = "yyyy-MM-dd HH:mm:ss";
 		public const string TextQueryAdded = "Query added";
 		public const string TextLineEnd = "\n\r";
+		public const string TextDbObjectInBusy = "A very rare event! Create a new Dbw for a once use with state: ";
 	}
 }

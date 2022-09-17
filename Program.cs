@@ -18,7 +18,6 @@ namespace SqlCacheService
 					services.AddHostedService<Worker>();
 				})
 				.Build();
-
 			host.RunAsync().Wait();
 		}
 	}

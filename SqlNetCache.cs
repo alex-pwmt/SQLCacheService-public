@@ -22,16 +22,17 @@ namespace SqlCacheService
 
 	public class QueryData
 	{
-		public QueryData()
+		public QueryData( string connectionString )
 		{
 			BufferList = new SqlResultBuffer[_buffersNumber];
+			ConnectionString = ReBuildConnectionString( connectionString, _connectionDict );
 		}
 		//
 		public string? QueryId;
 		public string? Sql;
 		public string? DbType;
 		public string? DtFormat;
-		public string? ConnectionString;
+		public readonly string? ConnectionString;
 		public int JsonResultType;
 		public int Timer;
 		public int TimerCount;
@@ -48,15 +49,55 @@ namespace SqlCacheService
 		public readonly SqlResultBuffer[] BufferList;
 		public int CurrentBufferIndex = -1;
 
+		readonly Dictionary<string, string> _connectionDict = new Dictionary<string, string>();
+		public string ConnectionServer => _connectionDict["SERVER"];
+
+		/// <summary>
+		/// Rebuild connection string in the same order.
+		/// </summary>
+		/// <param name="connectionString">Connection string to rebuild.</param>
+		/// <param name="connectionDict">Dictionary where to save parts.</param>
+		/// <returns>Reordered connection string.</returns>
+		static string ReBuildConnectionString( string connectionString, IDictionary<string, string> connectionDict )
+		{
+			var conSplit = connectionString.Split(';');
+			foreach( var cs in conSplit )
+			{
+				var partS = cs.Trim();
+				if( partS.Length==0 ) continue;
+				var part = partS.Split('=');
+				connectionDict.Add( part[0].Trim().ToUpper(), part[1].Trim() );
+			}
+			return string.Join(';', connectionDict
+				.OrderBy( pair => pair.Key )
+				.Select( (k) => k.Key+'='+k.Value ) );
+		}
+		
+		/// <summary>
+		/// Compare connection string with saved in QueryData object.
+		/// </summary>
+		/// <param name="connectionString">Connection string to compare.</param>
+		/// <returns>True if equal.</returns>
+		public bool CompareConnectionString( string connectionString )
+		{
+			var connectionDict = new Dictionary<string, string>();
+			return ConnectionString==ReBuildConnectionString( connectionString, connectionDict );
+		}
+
+		/// <summary>
+		/// Return index of free buffer from the list of _buffersNumber buffers.
+		/// </summary>
+		/// <returns>Index of free buffer in SqlResultBuffer[].</returns>
+		/// <exception cref="IndexOutOfRangeException">There is no free buffer with Readers count equal 0.</exception>
 		public int GetFreeSqlBuffer()
 		{
-			for (int i=0; i<_buffersNumber; i++ )
+			for( var i=0; i<_buffersNumber; i++ )
 			{
 				if( i!=CurrentBufferIndex && BufferList[i].Readers==0 )
 				{
 					BufferList[i].Rows = 0;
 					BufferList[i].OutBufferSize = 0;
-					if (BufferList[i].OutMemoryStream==null)
+					if( BufferList[i].OutMemoryStream==null )
 					{
 						BufferList[i].OutMemoryStream = new MemoryStream();
 					}
@@ -68,7 +109,7 @@ namespace SqlCacheService
 				}
 			}
 			// TODO All buffer for SQL queries are looked!
-			throw new Exception("All buffer for SQL queries are looked!");
+			throw new IndexOutOfRangeException( "All buffer for SQL queries are looked!" );
 		}
 
 		/// <summary>
@@ -76,7 +117,7 @@ namespace SqlCacheService
 		/// </summary>
 		public int RemoveSqlBuffer()
 		{
-			int k = 0;
+			var k = 0;
 			for( var i=0; i<_buffersNumber; i++ )
 			{
 				if (BufferList[i].Readers==0 && i!=CurrentBufferIndex)
@@ -92,10 +133,14 @@ namespace SqlCacheService
 		}
 	}
 
+	/// <summary>
+	/// Encapsulate thread safety methods to work with List of QueryData.
+	/// </summary>
 	internal class QueryController
 	{
 		public readonly List<QueryData> QueryList = new List<QueryData>();
-		public void AddQueryData(QueryData cd)
+
+		public void AddQueryData( QueryData cd )
 		{
 			lock( QueryList )
 			{
@@ -105,37 +150,50 @@ namespace SqlCacheService
 				}
 			}
 		}
-		public void RemoveQueryData(string queryId)
+		public void RemoveQueryData( string queryId )
 		{
 			lock( QueryList )
 			{
-				QueryList.RemoveAt(QueryList.FindIndex(listItem => listItem.QueryId==queryId));
+				QueryList.RemoveAt(QueryList.FindIndex( listItem => listItem.QueryId==queryId) );
 			}
 		}
-		public int FindQueryData(string queryId)
+		public int FindQueryData( string queryId )
 		{
 			int result;
-			lock (QueryList)
+			lock( QueryList )
 			{
-				result = QueryList.FindIndex(listItem => listItem.QueryId==queryId);
+				result = QueryList.FindIndex( listItem => listItem.QueryId==queryId );
+			}
+			return result;
+		}
+		public int FindQueryData(string queryId, string connectionString  )
+		{
+			int result;
+			lock( QueryList )
+			{
+				result = QueryList.FindIndex( listItem => 
+					listItem.QueryId==queryId && listItem.CompareConnectionString(connectionString) );
 			}
 			return result;
 		}
 	}
 
+	/// <summary>
+	/// Method for work with DbConnection object of different providers and keep open and reuse.
+	/// </summary>
 	internal class Dbw : IDisposable
 	{
+		//readonly string _provider;
 		readonly Func<DbConnection> _dbwConnection;
 		readonly string _connectionString;
-		//readonly string _provider;
 		long _useCount;
 		DbConnection? _connectionObject;
 		readonly CancellationToken _cancellationToken;
 
 		public Dbw( string dbType, string connectionString, CancellationToken cancellationToken )
 		{
-			_cancellationToken = cancellationToken;
 			//_provider = dbType;
+			_cancellationToken = cancellationToken;
 			_connectionString = connectionString;
 			_dbwConnection = dbType switch
 			{
@@ -147,8 +205,7 @@ namespace SqlCacheService
 
 		public DbConnection? ConnectionObject
 		{
-			get
-			{
+			get {
 				if (BeginUse()==0)
 				{
 					if( _connectionObject is null )
@@ -158,11 +215,9 @@ namespace SqlCacheService
 					}
 					return _connectionObject;
 				}
-				Console.WriteLine("A very rare event! Create a new Dbw for a once use with state: " + _connectionObject?.State);
 				return null;
 			}
 		}
-
 
 		/// <summary>
 		/// Check if this DbConnection object is currently in use. If somebody uses it to make a clone.
@@ -176,6 +231,9 @@ namespace SqlCacheService
 		/// <returns></returns>
 		public long EndUse() => Interlocked.Exchange(ref _useCount, 0);
 		
+		/// <summary>
+		/// Close associated object.
+		/// </summary>
 		public void Close()
 		{
 			// nothing to wait here
@@ -202,19 +260,60 @@ namespace SqlCacheService
 		}
 	}
  
-	
+	/// <summary>
+	/// Abstract class of external methods. Reloaded in SqlNetCache.
+	/// </summary>
 	public abstract class SqlNetCacheData
 	{
-		public abstract (int, int, MemoryStream?) StartReadQueryDataById( string id, string connection );
-		public abstract (int, int, MemoryStream?) StartReadQueryDataById( string id );
-		public abstract bool StopReadQueryDataById( string id, int bufferIndex, int queryIndex );
+		/// <summary>
+		/// Looking for stored query by <b>id</b> and <b>connection string</b> and increase readers count. 
+		/// </summary>
+		/// <param name="id">Query <b>id</b></param>
+		/// <param name="connection">DBConnection object <b>connection string</b>.</param>
+		/// <returns>Tuple (int bufferIndex, int queryIndex, MemoryStream? dataStream) where
+		/// bufferIndex - index in BufferList (SqlResultBuffer[]) or -1 if the query have not found.,
+		/// queryIndex - index in QueryList (list of QueryData) or -1 if the query have not found.
+		/// dataStream - MemoryStream object with the data or null.</returns>
+		public abstract ( int bufferIndex, int queryIndex, MemoryStream? dataStream ) StartReadQueryDataById( string id, string connection );
+		public abstract ( int bufferIndex, int queryIndex, MemoryStream? dataStream ) StartReadQueryDataById( string id );
+		
+		/// <summary>
+		/// Decrease readers count of the SqlResultBuffer object by bufferIndex and queryIndex
+		/// returned by StartReadQueryDataById. Should be call after <b>StartReadQueryDataById()</b>.
+		/// </summary>
+		/// <param name="bufferIndex">bufferIndex - index in BufferList (SqlResultBuffer[])</param>
+		/// <param name="queryIndex">queryIndex - index in QueryList (list of QueryData)</param>
+		/// <returns>true if success.</returns>
+		public abstract bool StopReadQueryDataById( int bufferIndex, int queryIndex );
+		
+		/// <summary>
+		/// Fetching data from SQL server.
+		/// </summary>
+		/// <param name="connectionString">Should be rebuild by ReBuildConnectionString() before call.</param>
+		/// <param name="sql">SQL command string.</param>
+		/// <param name="jsonResultType">Type of result. See JSON config file description.</param>
+		/// <param name="memoryStream">MemoryStream to which save the data.</param>
+		/// <param name="dbType">MySqlConnection or NpgsqlConnection</param>
+		/// <param name="dtFormat">Format of DateTime fields for converting to JSON when json_result=0.</param>
+		/// <returns>Task int - number of fetched rows.</returns>
 		public abstract Task<int> FetchSqlData(string? connectionString, string? sql, int jsonResultType, 
-			MemoryStream memoryStream, string dbType );
+			MemoryStream memoryStream, string dbType,  string? dtFormat );
+		
+		/// <summary>
+		/// Add new QueryData object with saved data to the list.
+		/// </summary>
+		/// <param name="cd">QueryData object.</param>
+		/// <returns>0 if success or -1.</returns>
 		public abstract int AddNewQuery( QueryData? cd );
 
-		// ok, cmd, jsonResult, queryId, connectionString, dbType, sql, dtFormat
+		/// <summary>
+		/// Parse Json object with a request to add query to cache.
+		/// </summary>
+		/// <param name="request">String to parse.</param>
+		/// <returns>Tuple with the request field (ok, cmd, jsonResult, queryId,
+		/// connectionString, dbType, sql, dtFormat). <b>ok</b> - true is success.</returns>
 		public abstract (bool ok, int cmd, int jsonResult, int timer, string? queryId, string? connectionString, 
-						string? dbType, string? sql, string? dtFormat) ParseJsonRequest(string request);
+						string? dbType, string? sql, string? dtFormat) ParseJsonRequest( string request );
 	}
 
 	/// <summary>
@@ -230,7 +329,7 @@ namespace SqlCacheService
 		int _onExit;
 		int _queriesNumber;
 		readonly int _listenPort = 38888;
-		readonly int _defaultTimer = 600;
+		readonly int _defaultTimer = 60;
 		readonly bool _configured;
 		readonly QueryController _queryController = new QueryController();
 		readonly List<string> _sqlConnectionList = new List<string>();
@@ -250,10 +349,10 @@ namespace SqlCacheService
 			_queriesNumber++;
 			return 0;
 		}
-		public override (int, int, MemoryStream?) StartReadQueryDataById( string id, string connection )
+		public override ( int, int, MemoryStream? ) StartReadQueryDataById( string id, string connection )
 		{
 			int buffer;
-			int index = _queryController.FindQueryData(id);
+			int index = _queryController.FindQueryData( id, connection );
 			
 			if (index==-1) return ( -1, -1, null );
 
@@ -261,12 +360,8 @@ namespace SqlCacheService
 			{
 				// Here it is needed to get CurrentBufferIndex and increase Readers
 				buffer = _queryController.QueryList[index].CurrentBufferIndex;
-
-				if ( buffer==-1 || _queryController.QueryList[index].ConnectionString!=connection )
-				{
-					return (-1, -1, null);
-				}
-				// Return is OK inside of lock
+				if ( buffer==-1 ) return (-1, -1, null);
+				// Return is OK inside of lockq
 				_queryController.QueryList[index].BufferList[buffer].Readers++;
 			}
 
@@ -276,7 +371,7 @@ namespace SqlCacheService
 		public override (int, int, MemoryStream?) StartReadQueryDataById( string id )
 		{
 			int buffer;
-			int index = _queryController.FindQueryData(id);
+			var index = _queryController.FindQueryData(id);
 			if( index==-1 ) return ( -1, -1, null );
 
 			lock (_queryController.QueryList[index].LockQuery)
@@ -290,15 +385,21 @@ namespace SqlCacheService
 			return ( buffer, index, _queryController.QueryList[index].BufferList[buffer].OutMemoryStream );
 		}
 		
-		public override bool StopReadQueryDataById( string id, int bufferIndex, int queryIndex )
+		public override bool StopReadQueryDataById( int bufferIndex, int queryIndex )
 		{
 			// doest need to use lock here 
-			Interlocked.Add(ref _queryController.QueryList[queryIndex].BufferList[bufferIndex].Readers,-1);
-			Interlocked.Add(ref _queryController.QueryList[queryIndex].Uploaded,1);
+			Interlocked.Add( ref _queryController.QueryList[queryIndex].BufferList[bufferIndex].Readers, -1 );
+			Interlocked.Add( ref _queryController.QueryList[queryIndex].Uploaded, 1 );
 			return true;
 		}
 
-		static (bool ok, int cmd, int jsonResult, int timer, string? queryId, string? connectionString, string? dbType, string? sql, string? dtFormat) 
+		/// <summary>
+		/// Unpack dictionary with string, object of JSON query object.
+		/// </summary>
+		/// <param name="queryConfigDic">Dictionary type string, object</param>
+		/// <returns>Tuple represent query data object with the field "ok" which is true when operation success.</returns>
+		static (bool ok, int cmd, int jsonResult, int timer, string? queryId, 
+			string? connectionString, string? dbType, string? sql, string? dtFormat) 
 			UnpackJsonDicTuple( IReadOnlyDictionary<string, object>? queryConfigDic )
 		{
 			bool ok = false;
@@ -332,7 +433,7 @@ namespace SqlCacheService
 				if (cmd > 10) cmd = 1;
 
 				if( connectionString==null || queryId==null 
-					|| (cmd==10 && (dbType==null || sql==null || jsonResult<0 || jsonResult>2 )) )
+					|| (cmd==10 && (dbType==null || sql==null || jsonResult is < 0 or > 2 )) )
 				{
 					connectionString = Globals.ParseJsonError;
 				}
@@ -341,14 +442,15 @@ namespace SqlCacheService
 					ok = true;
 				}
 			}
-			catch (FormatException ex)
+			catch( Exception ex ) when( ex is ArgumentNullException or FormatException )
 			{
-				Console.WriteLine( Globals.Exception + ex.Message);
+				Console.WriteLine( Globals.Exception + ex.Message );
 				connectionString = ex.Message;
 			}
 
 			return ( ok, cmd, jsonResult, timer, queryId, connectionString, dbType, sql, dtFormat );
 		}
+		
 		public override (bool,int,int,int,string?,string?,string?,string?,string?) ParseJsonRequest( string request )
 		{
 			string errorMessage;
@@ -368,7 +470,7 @@ namespace SqlCacheService
 
 			if( errorMessage.Length>0 )
 			{
-				_logger.LogError(Globals.LoggerTemplate, DateTimeOffset.Now, errorMessage);
+				_logger.LogError( Globals.LoggerTemplate, DateTimeOffset.Now, errorMessage );
 			}
 			
 			return ( false, -1, 0, 1, null, errorMessage, null, null, null );
@@ -434,7 +536,7 @@ namespace SqlCacheService
 								
 							if( queryJson.ok )
 							{
-								_queryController.AddQueryData(new QueryData
+								_queryController.AddQueryData(new QueryData( queryJson.connectionString! )
 								{
 									JsonResultType = queryJson.jsonResult,
 									ConnectionIndex = k - 1,
@@ -442,13 +544,12 @@ namespace SqlCacheService
 									QueryId = queryJson.queryId,
 									Sql = queryJson.sql,
 									DbType = queryJson.dbType,
-									DtFormat = queryJson.dtFormat,
-									ConnectionString = queryJson.connectionString,
+									DtFormat = queryJson.dtFormat
 								});
 							}
 							else
 							{
-								_logger.LogError(Globals.LoggerTemplate, DateTimeOffset.Now, queryJson.connectionString );
+								_logger.LogError( Globals.LoggerTemplate, DateTimeOffset.Now, queryJson.connectionString );
 							}
 						}
 
@@ -491,7 +592,7 @@ namespace SqlCacheService
 			
 			_systemTimer = new Timer( TimeSpan.FromSeconds(_defaultTimer).TotalMilliseconds );
 			_systemTimer.Elapsed += TimeHandler!;
-			_systemTimer.AutoReset = true;
+			_systemTimer.AutoReset = false;
 			_systemTimer.Start();
 			
 			return _listenerTask;
@@ -504,7 +605,7 @@ namespace SqlCacheService
 		/// <param name="elapsed"></param>
 		void TimeHandler( object sender, ElapsedEventArgs elapsed )
 		{
-			_systemTimer!.Stop();
+			_systemTimer?.Stop();
 
 			if( _onExit>0 )
 			{
@@ -521,7 +622,7 @@ namespace SqlCacheService
 			
 			if( _onExit==0 )
 			{
-				_systemTimer.Interval = TimeSpan.FromSeconds(_defaultTimer).TotalMilliseconds; //_defaultTimer
+				_systemTimer!.Interval = TimeSpan.FromSeconds(_defaultTimer).TotalMilliseconds; //_defaultTimer
 				_systemTimer.Start();
 			}
 		}
@@ -543,12 +644,12 @@ namespace SqlCacheService
 			{
 				query.TimerCount++;
 				if( query.TimerCount<query.Timer ) continue;
-
 				query.TimerCount = 0;
+
 				var nextBuffer = query.GetFreeSqlBuffer();
 				query.BufferList[nextBuffer].OutMemoryStream ??= new MemoryStream();
 				var rows = await FetchSqlData( query.ConnectionString, 
-					query.Sql, query.JsonResultType, query.BufferList[nextBuffer].OutMemoryStream!, query.DbType! );
+					query.Sql, query.JsonResultType, query.BufferList[nextBuffer].OutMemoryStream!, query.DbType!, query.DtFormat );
 
 				if( rows==0 )
 				{
@@ -577,7 +678,7 @@ namespace SqlCacheService
 		}
 
 		public override async Task<int> FetchSqlData( string? connectionString, string? sql, int jsonResultType,
-			MemoryStream memoryStream, string dbType )
+			MemoryStream memoryStream, string dbType, string? dtFormat )
 		{
 			if (connectionString==null || sql==null) return 0;
 
@@ -593,6 +694,7 @@ namespace SqlCacheService
 			DbConnection? dbcon;
 			DbCommand? dbcmd = null;
 
+			dtFormat ??= Globals.TextDateFormat;
 			try
 			{
 				if (!_connectionPool.ContainsKey(connectionString))
@@ -610,13 +712,14 @@ namespace SqlCacheService
 
 				if (dbcon is null)
 				{
-					// Creat a new Dbw for a once use
+					// Create a new Dbw for a once use
 					db = new Dbw(dbType, connectionString, _cancellationToken);
 					dbcon = db.ConnectionObject;
 					newConnection = true;
-				}
+                    _logger.LogInformation( Globals.LoggerTemplate, DateTimeOffset.Now, Globals.TextDbObjectInBusy );
+                }
 
-				dbcmd = dbcon!.CreateCommand();
+                dbcmd = dbcon!.CreateCommand();
 				dbcmd.CommandText = sql;
 
 				if (jsonResultType==2)
@@ -663,7 +766,7 @@ namespace SqlCacheService
 					while (await reader.ReadAsync(_cancellationToken))
 					{
 						jsonWriter.WriteStartArray();
-						for (int i = 0; i < position; i++)
+						for (var i = 0; i < position; i++)
 						{
 							switch (reader[i])
 							{
@@ -688,7 +791,7 @@ namespace SqlCacheService
 									//break;
 
 								case DateTime or DateTimeOffset:
-									jsonWriter.WriteStringValue(reader.GetDateTime(i).ToString(Globals.TextDateFormat));
+									jsonWriter.WriteStringValue(reader.GetDateTime(i).ToString(dtFormat));
 									//CultureInfo.InvariantCulture
 									break;
 
@@ -738,8 +841,8 @@ namespace SqlCacheService
 			finally
 			{
 				// clean up
-				if (dbcmd!=null) dbcmd.Dispose();
-				if (db!=null)
+				dbcmd?.Dispose();
+				if( db!=null )
 				{
 					db.EndUse();
 					if (newConnection)
@@ -766,58 +869,54 @@ namespace SqlCacheService
 			var taskList = new List<Task>();
 			
 			if (_sqlTask!=null) taskList.Add(_sqlTask);
-
 			if (_tcpListener!=null)
 			{
-				taskList.Add(Task.Run(() => _tcpListener.Exit(), _cancellationToken));
-				if (_listenerTask!=null) taskList.Add(_listenerTask);
+				taskList.Add( Task.Run(() => _tcpListener.Exit(), _cancellationToken) );
+				if( _listenerTask!=null ) taskList.Add( _listenerTask );
 			}
 
-			Task.WaitAll(taskList.ToArray(),_cancellationToken );
-
+			Task.WaitAll(taskList.ToArray(), _cancellationToken );
 			_logger.LogInformation(Globals.LoggerTemplate, DateTimeOffset.Now, Globals.TextListenerClosed );
-			//Console.Write("\nSqlCache finished. Goodbye!\n");
 		}
 
 		/// <summary>
 		/// Display the list of stored queries.
 		/// </summary>
-		public void DisplayStoredQueries()
+		public void DisplayStoredQueries( StringBuilder output )
 		{
-			string separator = new String('-', 116);
-			Console.WriteLine($"\n\n{"Server",-20}{"DB Type",-20}{"Query ID",-20}{"Rows",-8}{"Data size",-14}{"Uploads",-10}{"Updates",-10}{"Max buffers",-14}" );
-			Console.WriteLine(separator);
-			foreach (QueryData query in _queryController.QueryList)
+			if( _queryController.QueryList.Count==0 )
 			{
-				var conSplit = (query.ConnectionString??"").Split(';');
-				var host="";
-				foreach (var sc in conSplit)
-				{
-					if (sc.IndexOf("server", StringComparison.OrdinalIgnoreCase)!=-1)
-					{
-						host = sc.Split('=')[1];
-					}
-					break;
-				}
-				Console.WriteLine(
-					$"{host,-20}{query.DbType,-20}{query.QueryId,-20}{query.Rows,-8}{query.DataSize,-14}{query.Uploaded,-10}{query.Updated,-10}{query.MaxBufferIndex+1,-14}" );
+				output.Append( Globals.TextNoQueries );
+				return;
+			}
+			
+			var separator = new string('-', 116);
+			
+			output.Append( $"\n\r{"Server",-20}{"DB Type",-20}{"Query ID",-20}{"Rows",-8}{"Data size",-14}{"Uploads",-10}{"Updates",-10}{"Max buffers",-14}\n\r" );
+			output.Append( separator );
+
+			foreach( QueryData query in _queryController.QueryList )
+			{
+				output.Append(
+					$"\n\r{query.ConnectionServer,-20}{query.DbType,-20}{query.QueryId,-20}{query.Rows,-8}{query.DataSize,-14}{query.Uploaded,-10}{query.Updated,-10}{query.MaxBufferIndex+1,-14}" );
 			}
 		}
 
 		/// <summary>
 		/// Push to reload all queries.
 		/// </summary>
-		public void ReloadQueries()
+		public void ReloadQueries( StringBuilder output )
 		{
-			Console.WriteLine(Globals.NotImplementedError);
+			if( _systemTimer!=null ) _systemTimer.Interval = 1;
+			output.Append( "Done." );
 		}
 		
 		/// <summary>
 		/// Push to reload all queries.
 		/// </summary>
-		public void DisplayTcpClients()
+		public void DisplayTcpClients( StringBuilder output )
 		{
-			Console.WriteLine(Globals.NotImplementedError);
+			output.Append( Globals.NotImplementedError );
 		}
 	}
 }
