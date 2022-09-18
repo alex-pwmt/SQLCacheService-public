@@ -102,11 +102,11 @@ namespace SqlCacheService
 		readonly IPAddress _ipAddress;
 		TcpListener? _tcpListener;
 		readonly ClientController _clientController = new ClientController();
-		readonly SqlNetCacheData _queryData;
+		readonly SqlNetCacheData _queryCache;
 		readonly CancellationToken _cancellationToken;
 		readonly ILogger _logger;
 		
-		public TcpSocketListener( int port, SqlNetCacheData queryData, CancellationToken cancellationToken, ILogger logger )
+		public TcpSocketListener( int port, SqlNetCacheData queryCache, CancellationToken cancellationToken, ILogger logger )
 		{
 			_logger = logger;
 			_cancellationToken = cancellationToken;
@@ -116,7 +116,7 @@ namespace SqlCacheService
 			//_ipAddress = _ipHostInfo.AddressList[0];
 			_ipAddress = IPAddress.Any;
 			//_localEndPoint = new IPEndPoint(_ipAddress, _port);
-			_queryData = queryData;
+			_queryCache = queryCache;
 		}
 
 		public async void StartListening()
@@ -188,7 +188,7 @@ namespace SqlCacheService
 				}
 				if( client.BufferIndex>=0 && client.QueryId!=null )
 				{
-					_queryData.StopReadQueryDataById( client.BufferIndex, client.QueryIndex );
+					_queryCache.StopReadQueryDataById( client.BufferIndex, client.QueryIndex );
 					client.BufferIndex = -1;
 					client.QueryId = null;
 				}
@@ -220,7 +220,7 @@ namespace SqlCacheService
 				catch( Exception ex ) when( ex is ObjectDisposedException or SocketException )
 				{
 					#if DEBUG && CONSOLE
-						Console.WriteLine( "ReadCallback " + Globals.ObjectDisposedException + ex.Message);
+						Console.WriteLine( "ReadCallback " + Globals.ObjectDisposedException + ex.Message );
 					#endif
 					bytesRead = -2;
 				}
@@ -238,19 +238,19 @@ namespace SqlCacheService
 				{
 					if( state.OnLoadJson || part[0]=='{' )
 					{
+						//Console.WriteLine($"request[0]={request[0]} request[end]={request[^1]}");
 						state.OnLoadJson = true;
-						//Console.WriteLine($"OnLoadJson={state.OnLoadJson} request[0]={request[0]} request[end]={request[^1]}");
 						if (request.EndsWith('}'))
 						{
 							state.OnLoadJson = false;
 							// parse the request
-							var jsQuery = _queryData.ParseJsonRequest(request);
+							var jsQuery = _queryCache.ParseJsonRequest(request);
 							if( jsQuery.ok )
 							{
 								string errorStr;
 								state.QueryId = jsQuery.queryId;
 								(state.BufferIndex, state.QueryIndex, MemoryStream? mStream) = 
-									_queryData.StartReadQueryDataById( jsQuery.queryId!, jsQuery.connectionString! );
+									_queryCache.StartReadQueryDataById( jsQuery.queryId!, jsQuery.connectionString! );
 								
 								#if DEBUG && CONSOLE && VERBOSE
 									Console.WriteLine($"\ncmd:{cmd} queryId={queryId} jsonResult={jsonResult} BufferIndex={state.BufferIndex}");
@@ -277,7 +277,7 @@ namespace SqlCacheService
 										MaxBufferIndex = 0
 									};
 
-									var taskFetch = _queryData.FetchSqlData( 
+									var taskFetch = _queryCache.FetchSqlData( 
 										jsQuery.connectionString, jsQuery.sql, jsQuery.jsonResult, mStream, jsQuery.dbType, jsQuery.dtFormat );
 
 									taskFetch.Wait( 5000, _cancellationToken );
@@ -353,7 +353,7 @@ namespace SqlCacheService
 					else
 					{
 						state.OutDataSb.Clear();
-						state.OutDataSb.Append( Globals.QueryNotFoundError + Globals.TextLineEnd );
+						TerminalResponse( part[0], state.OutDataSb );
 					}
 					
 					// send respond from OutDataSb
@@ -372,7 +372,7 @@ namespace SqlCacheService
 					{
 						// inform about error and wait for other request
 						#if DEBUG && CONSOLE
-							Console.WriteLine( $"OutBuffer=NULL {state.QueryId ?? "<empty>"} QueryIndex={state.QueryIndex,-15} OutBufferSize={state.OutBufferSize}");
+							//Console.WriteLine( $"OutBuffer=NULL {state.QueryId ?? "<empty>"} QueryIndex={state.QueryIndex,-15} OutBufferSize={state.OutBufferSize}");
 						#endif
 						state.WorkSocket?.Shutdown( SocketShutdown.Both );
 						state.WorkSocket?.Close();
@@ -445,7 +445,7 @@ namespace SqlCacheService
 						state.OutDataSb!.Clear();
 						if( state.BufferIndex>=0 )
 						{
-							_queryData.StopReadQueryDataById( state.BufferIndex, state.QueryIndex );
+							_queryCache.StopReadQueryDataById( state.BufferIndex, state.QueryIndex );
 							state.BufferIndex = -1;
 							#if DEBUG && VERBOSE && CONSOLE
 								Console.WriteLine($"Uploaded {state.BytesSent} bytes of " + state.QueryId);
@@ -454,7 +454,7 @@ namespace SqlCacheService
 						}
 						else if( state.BufferIndex==-2 )
 						{
-							var ret = _queryData.AddNewQuery( state.QdQueryData );
+							var ret = _queryCache.AddNewQuery( state.QdQueryData );
 							string message;
 							if( ret==0 )
 							{
@@ -482,10 +482,37 @@ namespace SqlCacheService
 				state.WorkSocket!.Shutdown( SocketShutdown.Both );
 				state.WorkSocket.Close();
 			}
+			
 			_clientController.RemoveClient( state.Id );
 			#if DEBUG && CONSOLE && VERBOSE 
 				Console.WriteLine( Globals.TextSocketClosed );
 			#endif
+		}
+
+		/// <summary>
+		/// Diagnostic response to a socket client when received non a JSON object.
+		/// </summary>
+		/// <param name="inputChar">Input char from socket.</param>
+		/// <param name="output">StringBuilder where to write the response.</param>
+		void TerminalResponse( char inputChar, StringBuilder output )
+		{
+			switch( inputChar )
+			{
+				case 'q' or 'Q':
+					_queryCache.DisplayStoredQueries( output );
+					break;
+				case 'r' or 'R':
+					_queryCache.ReloadQueries( output );
+					break;
+				case 'c' or 'C':
+					_queryCache.DisplayTcpClients( output );
+					break;
+				case 'e' or 'E':
+					break;
+				default:
+					output.Append( Globals.QueryNotFoundError + Globals.TextLineEnd );
+					break;
+			}
 		}
 	}
 }

@@ -1,6 +1,8 @@
-﻿using MySqlConnector;
+﻿using System.Data;
+using MySqlConnector;
 using Npgsql;
 using System.Data.Common;
+//using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Encodings.Web;
@@ -8,10 +10,8 @@ using System.Text.Json;
 using System.Timers;
 using Timer = System.Timers.Timer;
 
-
 namespace SqlCacheService
 {
-
 	public struct SqlResultBuffer
 	{
 		public int Readers;
@@ -22,10 +22,12 @@ namespace SqlCacheService
 
 	public class QueryData
 	{
+		const int BuffersNumber = 4;
+
 		public QueryData( string connectionString )
 		{
-			BufferList = new SqlResultBuffer[_buffersNumber];
-			ConnectionString = ReBuildConnectionString( connectionString, _connectionDict );
+			BufferList = new SqlResultBuffer[BuffersNumber];
+			ConnectionString = ReBuildConnectionString( connectionString, _connectionDict, true );
 		}
 		//
 		public string? QueryId;
@@ -45,11 +47,11 @@ namespace SqlCacheService
 		public int MaxBufferIndex;
 		
 		public readonly object LockQuery = new object();
-		readonly int _buffersNumber = 4;
 		public readonly SqlResultBuffer[] BufferList;
 		public int CurrentBufferIndex = -1;
 
 		readonly Dictionary<string, string> _connectionDict = new Dictionary<string, string>();
+
 		public string ConnectionServer => _connectionDict["SERVER"];
 
 		/// <summary>
@@ -57,41 +59,65 @@ namespace SqlCacheService
 		/// </summary>
 		/// <param name="connectionString">Connection string to rebuild.</param>
 		/// <param name="connectionDict">Dictionary where to save parts.</param>
+		/// <param name="addDefaults"></param>
 		/// <returns>Reordered connection string.</returns>
-		static string ReBuildConnectionString( string connectionString, IDictionary<string, string> connectionDict )
+		static string ReBuildConnectionString( string connectionString, IDictionary<string, string> connectionDict, bool addDefaults )
 		{
 			var conSplit = connectionString.Split(';');
 			foreach( var cs in conSplit )
 			{
 				var partS = cs.Trim();
 				if( partS.Length==0 ) continue;
+
 				var part = partS.Split('=');
-				connectionDict.Add( part[0].Trim().ToUpper(), part[1].Trim() );
+				part[0] = part[0].Trim().ToUpper();
+				part[0] = part[0] switch
+				{
+					"PIPE" => "PIPENAME",
+					"PWD" => "PASSWORD",
+					_ => part[0]
+				};
+				connectionDict.Add( part[0], part[1].Trim() );
 			}
-			return string.Join(';', connectionDict
+
+			if( addDefaults )
+			{
+				if( !connectionDict.ContainsKey( "POOLING" ) )
+				{
+					connectionDict["Pooling"] = "True";
+				}
+			}
+			
+			return string.Join( ';', connectionDict
 				.OrderBy( pair => pair.Key )
 				.Select( (k) => k.Key+'='+k.Value ) );
 		}
 		
 		/// <summary>
-		/// Compare connection string with saved in QueryData object.
+		/// Compare connection string with saved in QueryData object by fields: UID, PWD, DATABASE, SERVER.
 		/// </summary>
 		/// <param name="connectionString">Connection string to compare.</param>
 		/// <returns>True if equal.</returns>
 		public bool CompareConnectionString( string connectionString )
 		{
 			var connectionDict = new Dictionary<string, string>();
-			return ConnectionString==ReBuildConnectionString( connectionString, connectionDict );
+			ReBuildConnectionString( connectionString, connectionDict, false );
+			
+			// Compare with _connectionDict and connectionDict by UID, PWD, DATABASE, SERVER
+			return _connectionDict["UID"]==connectionDict["UID"] 
+			       && _connectionDict["PASSWORD"]==connectionDict["PASSWORD"]
+			       && _connectionDict["SERVER"]==connectionDict["SERVER"]
+			       && _connectionDict["DATABASE"]==connectionDict["DATABASE"];
 		}
 
 		/// <summary>
-		/// Return index of free buffer from the list of _buffersNumber buffers.
+		/// Return index of free buffer from the list of BuffersNumber buffers.
 		/// </summary>
 		/// <returns>Index of free buffer in SqlResultBuffer[].</returns>
 		/// <exception cref="IndexOutOfRangeException">There is no free buffer with Readers count equal 0.</exception>
 		public int GetFreeSqlBuffer()
 		{
-			for( var i=0; i<_buffersNumber; i++ )
+			for( var i=0; i<BuffersNumber; i++ )
 			{
 				if( i!=CurrentBufferIndex && BufferList[i].Readers==0 )
 				{
@@ -118,7 +144,7 @@ namespace SqlCacheService
 		public int RemoveSqlBuffer()
 		{
 			var k = 0;
-			for( var i=0; i<_buffersNumber; i++ )
+			for( var i=0; i<BuffersNumber; i++ )
 			{
 				if (BufferList[i].Readers==0 && i!=CurrentBufferIndex)
 				{
@@ -211,9 +237,10 @@ namespace SqlCacheService
 					if( _connectionObject is null )
 					{
 						_connectionObject = _dbwConnection();
-						_connectionObject.OpenAsync().Wait(_cancellationToken);
+						_connectionObject.OpenAsync().Wait( _cancellationToken );
 					}
-					return _connectionObject;
+					if( (_connectionObject.State & ConnectionState.Open)!=0 ) return _connectionObject; 
+					_connectionObject.Close();
 				}
 				return null;
 			}
@@ -223,13 +250,13 @@ namespace SqlCacheService
 		/// Check if this DbConnection object is currently in use. If somebody uses it to make a clone.
 		/// </summary>
 		/// <returns>0 if DbConnection was locked, otherwise 1.</returns>
-		long BeginUse() => Interlocked.CompareExchange(ref _useCount, 1, 0);
+		long BeginUse() => Interlocked.CompareExchange( ref _useCount, 1, 0 );
 
 		/// <summary>
 		/// Free DbConnection object. Set internal _useCount to 0.
 		/// </summary>
 		/// <returns></returns>
-		public long EndUse() => Interlocked.Exchange(ref _useCount, 0);
+		public long EndUse() => Interlocked.Exchange( ref _useCount, 0 );
 		
 		/// <summary>
 		/// Close associated object.
@@ -238,14 +265,14 @@ namespace SqlCacheService
 		{
 			// nothing to wait here
 			_connectionObject?.CloseAsync();
-			Interlocked.Exchange(ref _useCount, 0);
+			Interlocked.Exchange( ref _useCount, 0 );
 		}
 
 		// MySQL
-		DbConnection DbwMySqlConnection() => new MySqlConnection(_connectionString);
+		DbConnection DbwMySqlConnection() => new MySqlConnection( _connectionString );
 		
 		// PostgreSQL
-		DbConnection DbwNpgConnection() => new NpgsqlConnection(_connectionString);
+		DbConnection DbwNpgConnection() => new NpgsqlConnection( _connectionString );
 
 		// Not Implemented
 		DbConnection ThrowNotImplemented()
@@ -314,6 +341,21 @@ namespace SqlCacheService
 		/// connectionString, dbType, sql, dtFormat). <b>ok</b> - true is success.</returns>
 		public abstract (bool ok, int cmd, int jsonResult, int timer, string? queryId, string? connectionString, 
 						string? dbType, string? sql, string? dtFormat) ParseJsonRequest( string request );
+
+		/// <summary>
+		/// Display the list of stored queries.
+		/// </summary>
+		public abstract void DisplayStoredQueries( StringBuilder output );
+
+		/// <summary>
+		/// Push to reload all queries.
+		/// </summary>
+		public abstract void ReloadQueries( StringBuilder output );
+
+		/// <summary>
+		/// Push to reload all queries.
+		/// </summary>
+		public abstract void DisplayTcpClients( StringBuilder output );
 	}
 
 	/// <summary>
@@ -354,7 +396,10 @@ namespace SqlCacheService
 			int buffer;
 			int index = _queryController.FindQueryData( id, connection );
 			
-			if (index==-1) return ( -1, -1, null );
+			if (index==-1)
+			{
+				return (-1, -1, null);
+			}
 
 			lock( _queryController.QueryList[index].LockQuery )
 			{
@@ -544,7 +589,8 @@ namespace SqlCacheService
 									QueryId = queryJson.queryId,
 									Sql = queryJson.sql,
 									DbType = queryJson.dbType,
-									DtFormat = queryJson.dtFormat
+									DtFormat = queryJson.dtFormat,
+									TimerCount = queryJson.timer,			// to fetch at the begin 
 								});
 							}
 							else
@@ -697,9 +743,9 @@ namespace SqlCacheService
 			dtFormat ??= Globals.TextDateFormat;
 			try
 			{
-				if (!_connectionPool.ContainsKey(connectionString))
+				if( !_connectionPool.ContainsKey(connectionString) )
 				{
-					db = new Dbw(dbType, connectionString, _cancellationToken);
+					db = new Dbw( dbType, connectionString, _cancellationToken );
 					_connectionPool.Add(connectionString, db);
 				}
 				else
@@ -710,7 +756,7 @@ namespace SqlCacheService
 				// null is possible here if this object is locked
 				dbcon = db.ConnectionObject;
 
-				if (dbcon is null)
+				if( dbcon is null )
 				{
 					// Create a new Dbw for a once use
 					db = new Dbw(dbType, connectionString, _cancellationToken);
@@ -731,7 +777,7 @@ namespace SqlCacheService
 					streamWriter.Flush();
 					rows = 1;
 				}
-				else if (jsonResultType==1)
+				else if( jsonResultType==1 )
 				{
 					// each record is a json array so pack it into json array of arrays 
 					DbDataReader reader = await dbcmd.ExecuteReaderAsync(_cancellationToken);
@@ -752,7 +798,7 @@ namespace SqlCacheService
 					streamWriter.Write("]\n\r");
 					streamWriter.Flush();
 				}
-				else if (jsonResultType==0)
+				else if( jsonResultType==0 )
 				{
 					// normal sql result converting to json without fields' names
 					DbDataReader reader = await dbcmd.ExecuteReaderAsync(_cancellationToken);
@@ -763,7 +809,7 @@ namespace SqlCacheService
 					#endif
 					//var dbnull = DBNull.Value;
 					jsonWriter.WriteStartArray();
-					while (await reader.ReadAsync(_cancellationToken))
+					while( await reader.ReadAsync(_cancellationToken) )
 					{
 						jsonWriter.WriteStartArray();
 						for (var i = 0; i < position; i++)
@@ -833,9 +879,10 @@ namespace SqlCacheService
 					#endif
 				}
 			}
-			catch( Exception ex ) when (ex is InvalidOperationException or MySqlException or NpgsqlException )
+			catch( Exception ex ) 
+				//when (ex is InvalidOperationException or MySqlException or NpgsqlException or ArgumentException )
 			{
-				errorMessage = "Exception: " + ex.Message;
+				errorMessage = "Exception: " + ex.GetType() + " " + ex.Message;
 				rows = 0;
 			}
 			finally
@@ -853,7 +900,7 @@ namespace SqlCacheService
 				}
 			}
 
-			if( rows==0 && errorMessage.Length>0 )
+			if( errorMessage.Length>0 )
 			{
 				_logger.LogError(Globals.LoggerTemplate, DateTimeOffset.Now, errorMessage );
 			}
@@ -879,10 +926,7 @@ namespace SqlCacheService
 			_logger.LogInformation(Globals.LoggerTemplate, DateTimeOffset.Now, Globals.TextListenerClosed );
 		}
 
-		/// <summary>
-		/// Display the list of stored queries.
-		/// </summary>
-		public void DisplayStoredQueries( StringBuilder output )
+		public override void DisplayStoredQueries( StringBuilder output )
 		{
 			if( _queryController.QueryList.Count==0 )
 			{
@@ -890,33 +934,36 @@ namespace SqlCacheService
 				return;
 			}
 			
-			var separator = new string('-', 116);
+			var separator = new string('-', 109);
 			
-			output.Append( $"\n\r{"Server",-20}{"DB Type",-20}{"Query ID",-20}{"Rows",-8}{"Data size",-14}{"Uploads",-10}{"Updates",-10}{"Max buffers",-14}\n\r" );
+			output.Append( $"\n\r{"Server",-20} {"DB Type",-20} {"Query ID",-18} {"Rows",6} {"Data size",10} {"Uploads",8} {"Updates",8} {"Max buffers",12}\n\r" );
 			output.Append( separator );
 
+			var totalDataSize = 0;
 			foreach( QueryData query in _queryController.QueryList )
 			{
+				totalDataSize += query.DataSize;
 				output.Append(
-					$"\n\r{query.ConnectionServer,-20}{query.DbType,-20}{query.QueryId,-20}{query.Rows,-8}{query.DataSize,-14}{query.Uploaded,-10}{query.Updated,-10}{query.MaxBufferIndex+1,-14}" );
+					$"\n\r{query.ConnectionServer,-20} {query.DbType,-20} {query.QueryId,-18} {query.Rows,6} {query.DataSize.ToString("0,0"),10} {query.Uploaded,8} {query.Updated,8} {query.MaxBufferIndex+1,12}" );
 			}
+			output.Append( Globals.TextLineEnd );
+			output.Append( separator );
+			output.Append( $"\n\r{totalDataSize.ToString("0,0"),78}" );
+			output.Append( Globals.TextLineEnd );
 		}
 
-		/// <summary>
-		/// Push to reload all queries.
-		/// </summary>
-		public void ReloadQueries( StringBuilder output )
+		public override void ReloadQueries( StringBuilder output )
 		{
+			// Starting updates by resetting the timer to 1ms.
 			if( _systemTimer!=null ) _systemTimer.Interval = 1;
-			output.Append( "Done." );
+			output.Append( "Updates started..." );
+			output.Append( Globals.TextLineEnd );
 		}
 		
-		/// <summary>
-		/// Push to reload all queries.
-		/// </summary>
-		public void DisplayTcpClients( StringBuilder output )
+		public override void DisplayTcpClients( StringBuilder output )
 		{
 			output.Append( Globals.NotImplementedError );
+			output.Append( Globals.TextLineEnd );
 		}
 	}
 }

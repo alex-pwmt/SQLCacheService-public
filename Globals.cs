@@ -2,7 +2,7 @@
 {
 	public static class Globals
 	{
-		public const string TextServiceName = "SqlCacheService";
+		public const string TextServiceName = "SqlCacheService v0.3";
 		public const string LoggerTemplate = "{Time} {ErrorMessage}";
 
 		public const string LostContentError = "Socket client content was lost!";
